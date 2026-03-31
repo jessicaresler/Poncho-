@@ -1,0 +1,40 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --surface2: #f1f5f9;
+  --border: #e2e8f0;
+  --text: #334155;
+  --text-dim: #64748b;
+  --text-bright: #0f172a;
+  --accent: #00009B;
+  --accent-light: #2222C0;
+  --accent-glow: rgba(0, 0, 155, 0.15);
+  --hype: #7c3aed;
+  --hype-bg: rgba(124, 58, 237, 0.08);
+  --hype-border: rgba(124, 58, 237, 0.25);
+  --activate: #00009B;
+  --activate-bg: rgba(0, 0, 155, 0.08);
+  --activate-border: rgba(0, 0, 155, 0.25);
+  --green: #10b981;
+  --green-bg: rgba(16, 185, 129, 0.1);
+  --danger: #ef4444;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --sidebar-bg: #0f172a;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
