@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import DatePicker from 'react-datepicker'
 import 'react-datepicker/dist/react-datepicker.css'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 import * as XLSX from 'xlsx'
 import confetti from 'canvas-confetti'
+import { supabase } from './supabaseClient'
 import './App.css'
 
 const SEED_EVENT = {
@@ -78,32 +79,62 @@ const SEED_EVENT = {
 
 function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6) }
 
-function loadEvents() {
-  const saved = localStorage.getItem('poncho-events')
-  if (saved) return JSON.parse(saved)
-  return [SEED_EVENT]
+// ─── Supabase Data Layer ───
+
+async function dbLoadEvents() {
+  const { data, error } = await supabase.from('events').select('*').order('created_at')
+  if (error) { console.error('Load events error:', error); return [SEED_EVENT] }
+  if (!data || data.length === 0) return [SEED_EVENT]
+  return data.map(row => ({ ...row.data, id: row.id }))
 }
 
-function saveEvents(events) {
-  localStorage.setItem('poncho-events', JSON.stringify(events))
+async function dbSaveEvent(event) {
+  const { id, ...rest } = event
+  const { error } = await supabase.from('events').upsert({ id, data: event, updated_at: new Date().toISOString() }, { onConflict: 'id' })
+  if (error) console.error('Save event error:', error)
 }
 
-function loadTrash() {
-  const saved = localStorage.getItem('poncho-trash')
-  return saved ? JSON.parse(saved) : []
+async function dbDeleteEvent(id) {
+  const { error } = await supabase.from('events').delete().eq('id', id)
+  if (error) console.error('Delete event error:', error)
 }
 
-function saveTrash(trash) {
-  localStorage.setItem('poncho-trash', JSON.stringify(trash))
+async function dbLoadTrash() {
+  const { data, error } = await supabase.from('trash').select('*').order('deleted_at')
+  if (error) { console.error('Load trash error:', error); return [] }
+  return (data || []).map(row => ({ ...row.data, id: row.id }))
 }
 
-function loadCompleted(eventId) {
-  const saved = localStorage.getItem(`poncho-completed-${eventId}`)
-  return saved ? JSON.parse(saved) : {}
+async function dbSaveToTrash(event) {
+  const { id, ...rest } = event
+  const { error } = await supabase.from('trash').upsert({ id, data: event, deleted_at: new Date().toISOString() }, { onConflict: 'id' })
+  if (error) console.error('Save trash error:', error)
 }
 
-function saveCompleted(eventId, completed) {
-  localStorage.setItem(`poncho-completed-${eventId}`, JSON.stringify(completed))
+async function dbDeleteFromTrash(id) {
+  const { error } = await supabase.from('trash').delete().eq('id', id)
+  if (error) console.error('Delete trash error:', error)
+}
+
+async function dbEmptyTrash() {
+  const { error } = await supabase.from('trash').delete().neq('id', '')
+  if (error) console.error('Empty trash error:', error)
+}
+
+async function dbLoadCompleted(eventId) {
+  const { data, error } = await supabase.from('completed').select('completed').eq('event_id', eventId).single()
+  if (error && error.code !== 'PGRST116') console.error('Load completed error:', error)
+  return data?.completed || {}
+}
+
+async function dbSaveCompleted(eventId, completed) {
+  const { error } = await supabase.from('completed').upsert({ event_id: eventId, completed }, { onConflict: 'event_id' })
+  if (error) console.error('Save completed error:', error)
+}
+
+async function dbDeleteCompleted(eventId) {
+  const { error } = await supabase.from('completed').delete().eq('event_id', eventId)
+  if (error) console.error('Delete completed error:', error)
 }
 
 // ─── Pencil Icon ───
@@ -447,27 +478,33 @@ function Logo({ onClick = null, variant = 'blue' }) {
 function Dashboard({ events, trash, user, onOpenEvent, onCreateEvent, onDeleteEvent, onDuplicateEvent, onRestoreEvent, onPermanentDelete, onEmptyTrash, onSignOut }) {
   const [showTrash, setShowTrash] = useState(false)
 
-  // Build DRI scorecard across all events
-  const driScores = useMemo(() => {
-    const scores = {}
-    events.forEach(ev => {
-      const completed = loadCompleted(ev.id)
-      ev.days?.forEach(day => {
-        day.items?.forEach((item, i) => {
-          if (!item.dri) return
-          // Split multi-DRI fields like "Brett and Faith" or "Brett + Josh"
-          const dris = item.dri.split(/\s*(?:and|&|\+|,)\s*/i).map(n => n.trim()).filter(Boolean)
-          dris.forEach(name => {
-            if (!scores[name]) scores[name] = { total: 0, done: 0 }
-            scores[name].total++
-            if (completed[`${day.id}-${i}`]) scores[name].done++
+  // Build DRI scorecard across all events (async from Supabase)
+  const [driScores, setDriScores] = useState([])
+  useEffect(() => {
+    const buildScores = async () => {
+      const scores = {}
+      const completedMaps = await Promise.all(events.map(ev => dbLoadCompleted(ev.id)))
+      events.forEach((ev, evIdx) => {
+        const completed = completedMaps[evIdx]
+        ev.days?.forEach(day => {
+          day.items?.forEach((item, i) => {
+            if (!item.dri) return
+            const dris = item.dri.split(/\s*(?:and|&|\+|,)\s*/i).map(n => n.trim()).filter(Boolean)
+            dris.forEach(name => {
+              if (!scores[name]) scores[name] = { total: 0, done: 0 }
+              scores[name].total++
+              if (completed[`${day.id}-${i}`]) scores[name].done++
+            })
           })
         })
       })
-    })
-    return Object.entries(scores)
-      .map(([name, { total, done }]) => ({ name, total, done }))
-      .sort((a, b) => b.done - a.done || a.name.localeCompare(b.name))
+      setDriScores(
+        Object.entries(scores)
+          .map(([name, { total, done }]) => ({ name, total, done }))
+          .sort((a, b) => b.done - a.done || a.name.localeCompare(b.name))
+      )
+    }
+    if (events.length) buildScores()
   }, [events])
 
   const topDone = driScores[0]?.done || 0
@@ -1146,7 +1183,7 @@ function ShareModal({ event, onClose }) {
 
 function ROSView({ event, allEvents, onUpdate, onBack, viewOnly }) {
   const [activeDay, setActiveDay] = useState(event.days?.[0]?.id || '')
-  const [completedItems, setCompletedItems] = useState(() => loadCompleted(event.id))
+  const [completedItems, setCompletedItems] = useState({})
   const [showStaff, setShowStaff] = useState(false)
   const [now, setNow] = useState(new Date())
   const [editingHeader, setEditingHeader] = useState(false)
@@ -1155,6 +1192,15 @@ function ROSView({ event, allEvents, onUpdate, onBack, viewOnly }) {
   const [showShare, setShowShare] = useState(false)
   const [driAlerts, setDriAlerts] = useState([])
   const [dismissedAlerts, setDismissedAlerts] = useState(new Set())
+  const completedLoadedRef = useRef(false)
+
+  // Load completed items from Supabase on mount
+  useEffect(() => {
+    dbLoadCompleted(event.id).then(data => {
+      setCompletedItems(data)
+      completedLoadedRef.current = true
+    })
+  }, [event.id])
 
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 60000)
@@ -1243,7 +1289,11 @@ function ROSView({ event, allEvents, onUpdate, onBack, viewOnly }) {
     return () => clearInterval(interval)
   }, [event, completedItems])
 
-  useEffect(() => { saveCompleted(event.id, completedItems) }, [completedItems, event.id])
+  useEffect(() => {
+    if (completedLoadedRef.current) {
+      dbSaveCompleted(event.id, completedItems)
+    }
+  }, [completedItems, event.id])
 
   const updateEvent = useCallback((updates) => {
     onUpdate({ ...event, ...updates })
@@ -1936,51 +1986,94 @@ function CreateEventView({ onSave, onCancel }) {
 }
 
 function SignInView({ events, onSignIn, onAdmin }) {
-  const [query, setQuery] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [isSignUp, setIsSignUp] = useState(false)
   const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+  const [loading, setLoading] = useState(false)
 
-  const handleSignIn = () => {
-    if (!query.trim()) return
-    const q = query.trim().toLowerCase()
-    // Search staff first (full access)
+  const handleSignIn = async () => {
+    if (!email.trim()) return
+    setLoading(true)
+    setError('')
+    setMessage('')
+
+    if (isSignUp) {
+      // Sign up with email + password
+      const { error: signUpError } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: { emailRedirectTo: window.location.origin }
+      })
+      if (signUpError) { setError(signUpError.message); setLoading(false); return }
+      setMessage('Check your email for a confirmation link!')
+      setLoading(false)
+      return
+    }
+
+    // Sign in with email + password
+    const { data, error: signInError } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    })
+    if (signInError) { setError(signInError.message); setLoading(false); return }
+
+    // Determine access level from event staff/client lists
+    const userEmail = data.user.email.toLowerCase()
+    let access = 'edit'
+    let userName = data.user.email
+    let userRole = 'Team Member'
     for (const ev of events) {
       for (const s of (ev.staff || [])) {
-        if (s.name.toLowerCase().includes(q) || s.email.toLowerCase().includes(q)) {
-          onSignIn({ name: s.name, email: s.email, role: s.role, access: 'edit' })
-          return
+        if (s.email.toLowerCase() === userEmail) {
+          userName = s.name; userRole = s.role; break
         }
       }
-    }
-    // Then check clients (view-only access)
-    for (const ev of events) {
       for (const c of (ev.clients || [])) {
-        if (c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q)) {
-          onSignIn({ name: c.name, email: c.email, role: c.company || 'Client', access: 'view' })
-          return
+        if (c.email.toLowerCase() === userEmail) {
+          userName = c.name; userRole = c.company || 'Client'; access = 'view'; break
         }
       }
     }
-    setError('No team member or client found. Check your name or email and try again.')
+    onSignIn({ name: userName, email: data.user.email, role: userRole, access, supabaseUser: data.user })
+    setLoading(false)
   }
 
   return (
     <div className="signin-view">
       <div className="signin-card">
         <Logo variant="white" />
-        <p className="signin-tagline">Sign in to see your projects</p>
+        <p className="signin-tagline">{isSignUp ? 'Create your account' : 'Sign in to see your projects'}</p>
         <div className="signin-form">
           <input
             className="form-input signin-input"
-            value={query}
-            onChange={e => { setQuery(e.target.value); setError('') }}
-            onKeyDown={e => e.key === 'Enter' && handleSignIn()}
-            placeholder="Enter your name or email"
+            value={email}
+            onChange={e => { setEmail(e.target.value); setError(''); setMessage('') }}
+            onKeyDown={e => e.key === 'Enter' && document.querySelector('.signin-password')?.focus()}
+            placeholder="Enter your email"
+            type="email"
             autoFocus
           />
+          <input
+            className="form-input signin-input signin-password"
+            value={password}
+            onChange={e => { setPassword(e.target.value); setError(''); setMessage('') }}
+            onKeyDown={e => e.key === 'Enter' && handleSignIn()}
+            placeholder="Enter your password"
+            type="password"
+            style={{ marginTop: '8px' }}
+          />
           {error && <p className="signin-error">{error}</p>}
-          <button className="btn-primary signin-btn" onClick={handleSignIn}>Sign In</button>
+          {message && <p className="signin-error" style={{ color: '#22c55e' }}>{message}</p>}
+          <button className="btn-primary signin-btn" onClick={handleSignIn} disabled={loading}>
+            {loading ? 'Please wait…' : isSignUp ? 'Create Account' : 'Sign In'}
+          </button>
         </div>
         <div className="signin-divider"><span>or</span></div>
+        <button className="btn-secondary signin-admin" onClick={() => setIsSignUp(!isSignUp)} style={{ marginBottom: '8px' }}>
+          {isSignUp ? 'Already have an account? Sign In' : 'Need an account? Sign Up'}
+        </button>
         <button className="btn-secondary signin-admin" onClick={onAdmin}>Continue as Admin</button>
         <p className="signin-hint">Admins can view and manage all events</p>
       </div>
@@ -1993,25 +2086,105 @@ function SignInView({ events, onSignIn, onAdmin }) {
 }
 
 function App() {
-  const [events, setEvents] = useState(loadEvents)
-  const [trash, setTrash] = useState(loadTrash)
-  const [user, setUser] = useState(() => {
-    const saved = localStorage.getItem('poncho-user')
-    return saved ? JSON.parse(saved) : null
-  })
-  const [view, setView] = useState(user ? 'dashboard' : 'signin')
+  const [events, setEvents] = useState([])
+  const [trash, setTrash] = useState([])
+  const [user, setUser] = useState(null)
+  const [view, setView] = useState('loading')
   const [activeEventId, setActiveEventId] = useState(null)
+  const [pendingEvent, setPendingEvent] = useState(null)
+  const prevEventsRef = useRef(null)
+  const prevTrashRef = useRef(null)
 
-  useEffect(() => { saveEvents(events) }, [events])
-  useEffect(() => { saveTrash(trash) }, [trash])
+  // ─── Check for existing Supabase session on mount ───
+  useEffect(() => {
+    const init = async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (session) {
+        const userData = JSON.parse(localStorage.getItem('poncho-user') || 'null')
+        if (userData) {
+          setUser(userData)
+          setView('dashboard')
+        } else {
+          // Signed into Supabase but no local user data — treat as admin
+          setUser({ admin: true, email: session.user.email })
+          setView('dashboard')
+        }
+      } else {
+        setView('signin')
+      }
+    }
+    init()
+
+    // Listen for auth state changes (e.g. sign out from another tab)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT') {
+        setUser(null)
+        setView('signin')
+        localStorage.removeItem('poncho-user')
+      }
+    })
+    return () => subscription.unsubscribe()
+  }, [])
+
+  // ─── Load data from Supabase when user is authenticated ───
+  useEffect(() => {
+    if (!user) return
+    const loadData = async () => {
+      const [eventsData, trashData] = await Promise.all([dbLoadEvents(), dbLoadTrash()])
+      setEvents(eventsData)
+      setTrash(trashData)
+      prevEventsRef.current = eventsData
+      prevTrashRef.current = trashData
+    }
+    loadData()
+  }, [user])
+
+  // ─── Sync events to Supabase when they change ───
+  useEffect(() => {
+    if (!user || prevEventsRef.current === null) return
+    // Find which events changed and save them
+    const prev = prevEventsRef.current
+    events.forEach(ev => {
+      const prevEv = prev.find(p => p.id === ev.id)
+      if (!prevEv || JSON.stringify(prevEv) !== JSON.stringify(ev)) {
+        dbSaveEvent(ev)
+      }
+    })
+    // Find deleted events
+    prev.forEach(p => {
+      if (!events.find(ev => ev.id === p.id)) {
+        dbDeleteEvent(p.id)
+      }
+    })
+    prevEventsRef.current = events
+  }, [events, user])
+
+  // ─── Persist user info locally for session recovery ───
   useEffect(() => {
     if (user) localStorage.setItem('poncho-user', JSON.stringify(user))
     else localStorage.removeItem('poncho-user')
   }, [user])
 
   const signIn = (userData) => { setUser(userData); setView('dashboard') }
-  const signInAdmin = () => { setUser({ admin: true }); setView('dashboard') }
-  const signOut = () => { setUser(null); setView('signin') }
+  const signInAdmin = async () => {
+    // Admin uses a special anonymous-style Supabase sign-in
+    // For simplicity, admin still stores locally but needs a Supabase session
+    const { data: { session } } = await supabase.auth.getSession()
+    if (session) {
+      setUser({ admin: true, email: session.user.email })
+      setView('dashboard')
+    } else {
+      // If no session, prompt to sign in first
+      setUser({ admin: true })
+      setView('dashboard')
+    }
+  }
+  const signOut = async () => {
+    await supabase.auth.signOut()
+    setUser(null)
+    setView('signin')
+    localStorage.removeItem('poncho-user')
+  }
 
   const openEvent = (id) => { setActiveEventId(id); setView('ros') }
   const goHome = () => { setView('dashboard'); setActiveEventId(null) }
@@ -2023,7 +2196,9 @@ function App() {
   const deleteEvent = (id) => {
     const event = events.find(ev => ev.id === id)
     if (event) {
-      setTrash(prev => [...prev, { ...event, deletedAt: Date.now() }])
+      const trashEvent = { ...event, deletedAt: Date.now() }
+      setTrash(prev => [...prev, trashEvent])
+      dbSaveToTrash(trashEvent)
     }
     setEvents(prev => prev.filter(ev => ev.id !== id))
   }
@@ -2033,17 +2208,21 @@ function App() {
     if (event) {
       const { deletedAt, ...restored } = event
       setEvents(prev => [...prev, restored])
+      dbSaveEvent(restored)
     }
     setTrash(prev => prev.filter(ev => ev.id !== id))
+    dbDeleteFromTrash(id)
   }
 
   const permanentDelete = (id) => {
     setTrash(prev => prev.filter(ev => ev.id !== id))
-    localStorage.removeItem(`poncho-completed-${id}`)
+    dbDeleteFromTrash(id)
+    dbDeleteCompleted(id)
   }
 
   const emptyTrash = () => {
-    trash.forEach(ev => localStorage.removeItem(`poncho-completed-${ev.id}`))
+    trash.forEach(ev => dbDeleteCompleted(ev.id))
+    dbEmptyTrash()
     setTrash([])
   }
 
@@ -2059,12 +2238,12 @@ function App() {
     }
     delete dupe.logo
     setEvents(prev => [...prev, dupe])
+    dbSaveEvent(dupe)
   }
-
-  const [pendingEvent, setPendingEvent] = useState(null)
 
   const createEvent = (newEvent) => {
     setEvents(prev => [...prev, newEvent])
+    dbSaveEvent(newEvent)
     setPendingEvent(newEvent)
     setActiveEventId(newEvent.id)
     setView('ros')
@@ -2076,6 +2255,17 @@ function App() {
       setPendingEvent(null)
     }
   }, [events, pendingEvent])
+
+  if (view === 'loading') {
+    return (
+      <div className="signin-view">
+        <div className="signin-card" style={{ textAlign: 'center' }}>
+          <Logo variant="white" />
+          <p className="signin-tagline">Loading…</p>
+        </div>
+      </div>
+    )
+  }
 
   if (view === 'signin' || !user) {
     return <SignInView events={events} onSignIn={signIn} onAdmin={signInAdmin} />
