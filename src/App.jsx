@@ -176,7 +176,7 @@ const ArchiveIcon = () => (
   </svg>
 )
 
-const PHASE_PRESETS = ['SOW Alignment', 'Pre-Production', 'Production', 'Post-Production', "It's a Wrap"]
+const PHASE_PRESETS = ['Pre-Production', 'Production', 'Post-Production']
 
 function PhaseSelect({ value, onChange }) {
   const [custom, setCustom] = useState(false)
