@@ -2293,11 +2293,18 @@ function App() {
     prevEventsRef.current = events
   }, [events, user])
 
-  const signOut = async () => {
-    await supabase.auth.signOut()
+  const signOut = () => {
+    // Clear UI immediately — don't block on network
     setUser(null)
+    setEvents([])
+    setTrash([])
+    setArchived([])
     setView('signin')
     localStorage.removeItem('poncho-user')
+    localStorage.removeItem('poncho-events-cache')
+    localStorage.removeItem('poncho-trash-cache')
+    localStorage.removeItem('poncho-archived-cache')
+    supabase.auth.signOut() // fire and forget
   }
 
   const openEvent = (id) => { setActiveEventId(id); setView('ros') }
