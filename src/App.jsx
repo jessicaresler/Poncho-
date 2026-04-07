@@ -967,14 +967,32 @@ function TimelineItem({ item, done, isLast, onToggle, onUpdate, onDelete }) {
 function DayEditForm({ day, onSave, onCancel }) {
   const [form, setForm] = useState(day)
   const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }))
+
+  const handleDatePick = (date) => {
+    if (!date) return
+    const label = date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
+    const shortLabel = date.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' })
+    setForm(prev => ({ ...prev, label, shortLabel }))
+  }
+
+  // Parse existing label back to a Date for the picker's default value
+  const pickerDate = parseDayDate(form.label)
+
   return (
     <div className="edit-form compact">
       <div className="form-row">
-        <label className="form-label">Label <input className="form-input" value={form.label} onChange={e => set('label', e.target.value)} placeholder="e.g. Monday, March 30" /></label>
-        <label className="form-label">Short Label <input className="form-input" value={form.shortLabel} onChange={e => set('shortLabel', e.target.value)} placeholder="e.g. Mon 3/30" /></label>
+        <label className="form-label">Date
+          <DatePicker
+            selected={pickerDate}
+            onChange={handleDatePick}
+            placeholderText="Pick a date"
+            className="form-input"
+            dateFormat="EEEE, MMMM d"
+          />
+        </label>
+        <label className="form-label">Subtitle <input className="form-input" value={form.subtitle} onChange={e => set('subtitle', e.target.value)} placeholder="e.g. Load In — Downtown" /></label>
       </div>
       <div className="form-row">
-        <label className="form-label">Subtitle <input className="form-input" value={form.subtitle} onChange={e => set('subtitle', e.target.value)} placeholder="e.g. Load In — Downtown" /></label>
         <label className="form-label">Tag <input className="form-input" value={form.phase} onChange={e => set('phase', e.target.value)} placeholder="e.g. Production" /></label>
       </div>
       <div className="form-actions-inline">
