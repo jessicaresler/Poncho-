@@ -1,9 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import DatePicker from 'react-datepicker'
 import 'react-datepicker/dist/react-datepicker.css'
-import jsPDF from 'jspdf'
-import autoTable from 'jspdf-autotable'
-import * as XLSX from 'xlsx'
 import confetti from 'canvas-confetti'
 import { supabase } from './supabaseClient'
 import './App.css'
@@ -121,6 +118,23 @@ async function dbEmptyTrash() {
   if (error) console.error('Empty trash error:', error)
 }
 
+async function dbLoadArchived() {
+  const { data, error } = await supabase.from('archived').select('*').order('archived_at')
+  if (error) { console.error('Load archived error:', error); return [] }
+  return (data || []).map(row => ({ ...row.data, id: row.id }))
+}
+
+async function dbSaveToArchive(event) {
+  const { id } = event
+  const { error } = await supabase.from('archived').upsert({ id, data: event, archived_at: new Date().toISOString() }, { onConflict: 'id' })
+  if (error) console.error('Save archive error:', error)
+}
+
+async function dbDeleteFromArchive(id) {
+  const { error } = await supabase.from('archived').delete().eq('id', id)
+  if (error) console.error('Delete archive error:', error)
+}
+
 async function dbLoadCompleted(eventId) {
   const { data, error } = await supabase.from('completed').select('completed').eq('event_id', eventId).single()
   if (error && error.code !== 'PGRST116') console.error('Load completed error:', error)
@@ -153,6 +167,12 @@ const TrashIcon = () => (
 const RestoreIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
     <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+  </svg>
+)
+
+const ArchiveIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+    <polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/>
   </svg>
 )
 
@@ -288,12 +308,13 @@ function WeatherBadge({ location, dateLabel }) {
       .catch(() => setLoading(false))
   }, [location, dateLabel])
 
-  if (loading) return <span className="weather-badge loading">Loading weather...</span>
+  if (loading) return <span className="weather-badge loading">☁️ Loading weather…</span>
   if (!weather) return null
 
   const info = getWeatherInfo(weather.code)
   return (
-    <div className="weather-badge">
+    <div className="weather-badge" title="Forecast for event location on this day">
+      <span className="weather-heading">Weather:</span>
       <span className="weather-icon">{info.icon}</span>
       <span className="weather-temp">{weather.high}°/{weather.low}°F</span>
       <span className="weather-label">{info.label}</span>
@@ -397,8 +418,6 @@ function DateRangeInput({ value, onChange }) {
     setEndDate(end)
     if (start && end) {
       onChange(formatDateRange(start, end))
-    } else if (start) {
-      onChange(formatDateRange(start, null))
     }
   }
 
@@ -475,8 +494,9 @@ function Logo({ onClick = null, variant = 'blue' }) {
   )
 }
 
-function Dashboard({ events, trash, user, onOpenEvent, onCreateEvent, onDeleteEvent, onDuplicateEvent, onRestoreEvent, onPermanentDelete, onEmptyTrash, onSignOut }) {
+function Dashboard({ events, trash, archived, user, onOpenEvent, onCreateEvent, onDeleteEvent, onDuplicateEvent, onRestoreEvent, onPermanentDelete, onEmptyTrash, onArchiveEvent, onUnarchiveEvent, onPermanentDeleteArchived, onSignOut }) {
   const [showTrash, setShowTrash] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
 
   // Build DRI scorecard across all events (async from Supabase)
   const [driScores, setDriScores] = useState([])
@@ -528,6 +548,11 @@ function Dashboard({ events, trash, user, onOpenEvent, onCreateEvent, onDeleteEv
           <button className="btn-primary" onClick={onCreateEvent}>
             <PlusIcon /> New Event
           </button>
+          {archived.length > 0 && (
+            <button className="btn-secondary" onClick={() => setShowArchived(!showArchived)}>
+              <ArchiveIcon /> Archived ({archived.length})
+            </button>
+          )}
           {trash.length > 0 && (
             <button className="btn-secondary trash-toggle" onClick={() => setShowTrash(!showTrash)}>
               <TrashIcon /> Recently Deleted ({trash.length})
@@ -547,6 +572,11 @@ function Dashboard({ events, trash, user, onOpenEvent, onCreateEvent, onDeleteEv
                 <button className="icon-btn" onClick={e => { e.stopPropagation(); onDuplicateEvent(ev.id) }} title="Duplicate event">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
+                {user?.access !== 'view' && (
+                  <button className="icon-btn" onClick={e => { e.stopPropagation(); onArchiveEvent(ev.id) }} title="Archive event">
+                    <ArchiveIcon />
+                  </button>
+                )}
                 {user?.access !== 'view' && (
                   <button className="icon-btn danger" onClick={e => { e.stopPropagation(); onDeleteEvent(ev.id) }} title="Delete event">
                     <TrashIcon />
@@ -595,6 +625,44 @@ function Dashboard({ events, trash, user, onOpenEvent, onCreateEvent, onDeleteEv
                 </div>
               )
             })}
+          </div>
+        </div>
+      )}
+
+      {showArchived && archived.length > 0 && (
+        <div className="trash-section">
+          <div className="trash-header">
+            <h3 className="section-title">Archived</h3>
+          </div>
+          <div className="dash-grid">
+            {archived.map(ev => (
+              <div key={ev.id} className="dash-card archived">
+                <div className="dash-card-top">
+                  <div className="dash-card-title">
+                    {ev.logo && <img src={ev.logo} alt="" className="event-logo-sm" />}
+                    <h3>{ev.name || 'Untitled Event'}</h3>
+                  </div>
+                  <div className="trash-card-actions">
+                    <button className="icon-btn restore" onClick={() => onUnarchiveEvent(ev.id)} title="Restore to active">
+                      <RestoreIcon />
+                    </button>
+                    <button className="icon-btn danger" onClick={() => onPermanentDeleteArchived(ev.id)} title="Delete permanently">
+                      <TrashIcon />
+                    </button>
+                  </div>
+                </div>
+                <div className="dash-card-meta">
+                  {ev.dates && <span>{ev.dates}</span>}
+                  {ev.location && <span>{ev.location}</span>}
+                  {ev.archivedAt && <span className="deleted-date">Archived {new Date(ev.archivedAt).toLocaleDateString()}</span>}
+                </div>
+                <div className="dash-card-stats">
+                  <span>{ev.days?.length || 0} days</span>
+                  <span>{ev.staff?.length || 0} staff</span>
+                  <span>{ev.days?.reduce((a, d) => a + (d.items?.length || 0), 0) || 0} tasks</span>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -858,6 +926,7 @@ function TimelineItem({ item, done, isLast, onToggle, onUpdate, onDelete }) {
           )}
         </div>
         <div className="tl-action">{item.action}</div>
+        {item.dri && <span className="dri-chip">{item.dri}</span>}
         {item.media?.length > 0 && (
           <div className="tl-media-row" onClick={e => e.stopPropagation()}>
             {item.media.map((m, idx) => (
@@ -873,10 +942,9 @@ function TimelineItem({ item, done, isLast, onToggle, onUpdate, onDelete }) {
             ))}
           </div>
         )}
-        {(item.dri || item.notes) && (
+        {item.notes && (
           <div className={`tl-details ${expanded ? 'expanded' : ''}`}>
-            {item.dri && <span className="dri-chip">{item.dri}</span>}
-            {item.notes && <span className="tl-notes">{item.notes}</span>}
+            <span className="tl-notes">{item.notes}</span>
           </div>
         )}
       </div>
@@ -906,14 +974,8 @@ function DayEditForm({ day, onSave, onCancel }) {
         <label className="form-label">Short Label <input className="form-input" value={form.shortLabel} onChange={e => set('shortLabel', e.target.value)} placeholder="e.g. Mon 3/30" /></label>
       </div>
       <div className="form-row">
-        <label className="form-label">Subtitle <input className="form-input" value={form.subtitle} onChange={e => set('subtitle', e.target.value)} placeholder="e.g. Hype Day 1 — Downtown" /></label>
-        <label className="form-label">Phase
-          <select className="form-input" value={form.phase} onChange={e => set('phase', e.target.value)}>
-            <option value="plan">Plan</option>
-            <option value="hype">Hype</option>
-            <option value="activation">Activation</option>
-          </select>
-        </label>
+        <label className="form-label">Subtitle <input className="form-input" value={form.subtitle} onChange={e => set('subtitle', e.target.value)} placeholder="e.g. Load In — Downtown" /></label>
+        <label className="form-label">Tag <input className="form-input" value={form.phase} onChange={e => set('phase', e.target.value)} placeholder="e.g. Production" /></label>
       </div>
       <div className="form-actions-inline">
         <button className="btn-small primary" onClick={() => onSave(form)}>Save</button>
@@ -1009,6 +1071,8 @@ async function fetchWeatherForDay(location, dateLabel) {
 }
 
 async function generateEventPDF(event) {
+  const { default: jsPDF } = await import('jspdf')
+  const { default: autoTable } = await import('jspdf-autotable')
   const doc = new jsPDF()
   const pageWidth = doc.internal.pageSize.getWidth()
 
@@ -1192,6 +1256,7 @@ function ROSView({ event, allEvents, onUpdate, onBack, viewOnly }) {
   const [showShare, setShowShare] = useState(false)
   const [driAlerts, setDriAlerts] = useState([])
   const [dismissedAlerts, setDismissedAlerts] = useState(new Set())
+  const [importingROS, setImportingROS] = useState(false)
   const completedLoadedRef = useRef(false)
 
   // Load completed items from Supabase on mount
@@ -1389,6 +1454,29 @@ function ROSView({ event, allEvents, onUpdate, onBack, viewOnly }) {
     e.target.value = ''
   }, [updateEvent])
 
+  const handleROSImport = useCallback(async (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    setImportingROS(true)
+    const parsed = await parseSpreadsheet(file)
+    // Merge imported days/staff into existing event (append, don't overwrite)
+    const mergedStaff = [...(event.staff || [])]
+    const existingNames = new Set(mergedStaff.map(s => s.name.toLowerCase()))
+    for (const s of (parsed.staff || [])) {
+      if (!existingNames.has(s.name.toLowerCase())) mergedStaff.push(s)
+    }
+    const mergedDays = [...(event.days || []), ...(parsed.days || [])]
+    updateEvent({
+      name: event.name || parsed.name,
+      dates: event.dates || parsed.dates,
+      location: event.location || parsed.location,
+      staff: mergedStaff,
+      days: mergedDays,
+    })
+    setImportingROS(false)
+    e.target.value = ''
+  }, [event, updateEvent])
+
   return (
     <div className="app">
       <header className="header">
@@ -1436,6 +1524,13 @@ function ROSView({ event, allEvents, onUpdate, onBack, viewOnly }) {
             <span className="staff-btn-icon">&#x1f465;</span>
             {showStaff ? 'Hide Team' : 'Team Directory'}
           </button>
+          {!viewOnly && (
+            <label className="staff-btn" title="Import a spreadsheet into this event">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              {importingROS ? ' Importing…' : ' Import Spreadsheet'}
+              <input type="file" accept=".xlsx,.xls,.csv" onChange={handleROSImport} style={{ display: 'none' }} />
+            </label>
+          )}
           <button className="staff-btn" onClick={() => setShowShare(true)}>
             <ShareIcon /> Download PDF
           </button>
@@ -1488,7 +1583,7 @@ function ROSView({ event, allEvents, onUpdate, onBack, viewOnly }) {
           return (
             <button key={d.id} className={`day-tab ${activeDay === d.id ? 'active' : ''} phase-${d.phase}`} onClick={() => setActiveDay(d.id)}>
               <span className="tab-label">{d.shortLabel}</span>
-              <span className="tab-phase">{d.phase === 'hype' ? 'Hype' : d.phase === 'plan' ? 'Plan' : 'Activate'}</span>
+              {d.phase && <span className="tab-phase">{d.phase}</span>}
               <span className="tab-progress">{dayDone}/{dayTotal}</span>
             </button>
           )
@@ -1671,7 +1766,8 @@ function EventGallery({ event }) {
 // ═══════════════════════════════════════
 // SPREADSHEET IMPORT
 // ═══════════════════════════════════════
-function parseSpreadsheet(file) {
+async function parseSpreadsheet(file) {
+  const XLSX = await import('xlsx')
   return new Promise((resolve) => {
     const reader = new FileReader()
     reader.onload = (e) => {
@@ -1689,6 +1785,7 @@ function parseSpreadsheet(file) {
         let section = null
         let currentDay = null
         let colMap = null
+        let staffColMap = null
 
         for (let r = 0; r < rows.length; r++) {
           const cells = rows[r].map(c => String(c || '').trim())
@@ -1721,6 +1818,13 @@ function parseSpreadsheet(file) {
           // ── Staff header detection ──
           if (allText.match(/\broles?\b/) && allText.match(/\bname\b/)) {
             section = 'staffing'
+            staffColMap = {}
+            lowerCells.forEach((c, i) => {
+              if (c === 'name') staffColMap.name = i
+              if (c === 'role' || c === 'roles') staffColMap.role = i
+              if (c === 'phone' || c === 'mobile' || c === 'cell') staffColMap.phone = i
+              if (c === 'email') staffColMap.email = i
+            })
             continue
           }
 
@@ -1776,12 +1880,25 @@ function parseSpreadsheet(file) {
             const hasEmail = cells.some(c => c.includes('@'))
             const hasName = cells.some(c => c.match(/[A-Z][a-z]+\s+[A-Z]/))
             if (hasPhone || hasEmail || hasName) {
-              const phone = cells.find(c => c.match(/\d{3}.*\d{4}/)) || ''
-              const email = cells.find(c => c.includes('@')) || ''
-              const textCells = cells.filter(c => c && !c.match(/\d{3}.*\d{4}/) && !c.includes('@'))
-              let role = textCells[0] || '', name = textCells[1] || textCells[0] || ''
-              if (role && name && name.match(/[A-Z][a-z]+\s+[A-Z]/) && !role.match(/[A-Z][a-z]+\s+[A-Z]/)) { /* correct */ }
-              else if (role.match(/[A-Z][a-z]+\s+[A-Z]/)) { [role, name] = [name, role] }
+              let name = '', role = '', phone = '', email = ''
+              if (staffColMap && Object.keys(staffColMap).length > 0) {
+                // Use detected column positions from header row
+                name = staffColMap.name != null ? cells[staffColMap.name] || '' : ''
+                role = staffColMap.role != null ? cells[staffColMap.role] || '' : ''
+                phone = staffColMap.phone != null ? cells[staffColMap.phone] || '' : (cells.find(c => c.match(/\d{3}.*\d{4}/)) || '')
+                email = staffColMap.email != null ? cells[staffColMap.email] || '' : (cells.find(c => c.includes('@')) || '')
+              } else {
+                // Fallback: detect from content
+                phone = cells.find(c => c.match(/\d{3}.*\d{4}/)) || ''
+                email = cells.find(c => c.includes('@')) || ''
+                const textCells = cells.filter(c => c && !c.match(/\d{3}.*\d{4}/) && !c.includes('@'))
+                role = textCells[0] || ''
+                name = textCells[1] || textCells[0] || ''
+                // Swap if first cell looks like a name (two proper-case words) instead of a role
+                if (role && name && role.match(/[A-Z][a-z]+\s+[A-Z]/) && !name.match(/[A-Z][a-z]+\s+[A-Z]/)) {
+                  [role, name] = [name, role]
+                }
+              }
               if (name) event.staff.push({ role, name, phone, email })
               continue
             }
@@ -1802,19 +1919,24 @@ function parseSpreadsheet(file) {
 
           if (isDayHeader) {
             const label = firstCell
+            // Normalize to title case for dedup comparison
+            const normalizedLabel = label.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()).replace(/\s+/g, ' ').trim()
+            // Skip if we already have this day (dedup)
+            const existing = event.days.find(d => d.label.toLowerCase().trim() === label.toLowerCase().trim())
+            if (existing) { currentDay = existing; section = 'ros'; continue }
             const shortParts = label.match(/(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\w*,?\s*([\w.]+\s+\d+)/i)
             let shortLabel
             if (shortParts) {
               shortLabel = (shortParts[1].slice(0, 3) + ' ' + shortParts[2]).slice(0, 12)
             } else {
-              shortLabel = label.replace(/\(.*?\)/g, '').trim().slice(0, 12)
+              shortLabel = normalizedLabel.replace(/\(.*?\)/g, '').trim().slice(0, 12)
             }
             const subtitle = cells.find((c, i) => i > 0 && c.length > 3) || ''
             const isActivation = allText.match(/\bevent\s*is\s*live\b|\bactivation\b/i)
             const isLoadIn = allText.match(/\bload[\s-]*in\b/i)
             const isLoadOut = allText.match(/\bload[\s-]*out\b|\bbreakdown\b/i)
-            const phase = isActivation ? 'activation' : (isLoadIn || isLoadOut) ? 'hype' : 'plan'
-            currentDay = { id: genId(), label, shortLabel, subtitle, phase, items: [] }
+            const phase = isActivation ? 'Activation' : isLoadIn ? 'Load In' : isLoadOut ? 'Load Out' : 'Production'
+            currentDay = { id: genId(), label: normalizedLabel, shortLabel, subtitle, phase, items: [] }
             event.days.push(currentDay)
             section = 'ros'
             continue
@@ -1985,97 +2107,30 @@ function CreateEventView({ onSave, onCancel }) {
   )
 }
 
-function SignInView({ events, onSignIn, onAdmin }) {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [isSignUp, setIsSignUp] = useState(false)
-  const [error, setError] = useState('')
-  const [message, setMessage] = useState('')
-  const [loading, setLoading] = useState(false)
-
-  const handleSignIn = async () => {
-    if (!email.trim()) return
-    setLoading(true)
-    setError('')
-    setMessage('')
-
-    if (isSignUp) {
-      // Sign up with email + password
-      const { error: signUpError } = await supabase.auth.signUp({
-        email: email.trim(),
-        password,
-        options: { emailRedirectTo: window.location.origin }
-      })
-      if (signUpError) { setError(signUpError.message); setLoading(false); return }
-      setMessage('Check your email for a confirmation link!')
-      setLoading(false)
-      return
-    }
-
-    // Sign in with email + password
-    const { data, error: signInError } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
+function SignInView({ error, loading }) {
+  const handleGoogle = async () => {
+    await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin },
     })
-    if (signInError) { setError(signInError.message); setLoading(false); return }
-
-    // Determine access level from event staff/client lists
-    const userEmail = data.user.email.toLowerCase()
-    let access = 'edit'
-    let userName = data.user.email
-    let userRole = 'Team Member'
-    for (const ev of events) {
-      for (const s of (ev.staff || [])) {
-        if (s.email.toLowerCase() === userEmail) {
-          userName = s.name; userRole = s.role; break
-        }
-      }
-      for (const c of (ev.clients || [])) {
-        if (c.email.toLowerCase() === userEmail) {
-          userName = c.name; userRole = c.company || 'Client'; access = 'view'; break
-        }
-      }
-    }
-    onSignIn({ name: userName, email: data.user.email, role: userRole, access, supabaseUser: data.user })
-    setLoading(false)
   }
 
   return (
     <div className="signin-view">
       <div className="signin-card">
         <Logo variant="white" />
-        <p className="signin-tagline">{isSignUp ? 'Create your account' : 'Sign in to see your projects'}</p>
-        <div className="signin-form">
-          <input
-            className="form-input signin-input"
-            value={email}
-            onChange={e => { setEmail(e.target.value); setError(''); setMessage('') }}
-            onKeyDown={e => e.key === 'Enter' && document.querySelector('.signin-password')?.focus()}
-            placeholder="Enter your email"
-            type="email"
-            autoFocus
-          />
-          <input
-            className="form-input signin-input signin-password"
-            value={password}
-            onChange={e => { setPassword(e.target.value); setError(''); setMessage('') }}
-            onKeyDown={e => e.key === 'Enter' && handleSignIn()}
-            placeholder="Enter your password"
-            type="password"
-            style={{ marginTop: '8px' }}
-          />
-          {error && <p className="signin-error">{error}</p>}
-          {message && <p className="signin-error" style={{ color: '#22c55e' }}>{message}</p>}
-          <button className="btn-primary signin-btn" onClick={handleSignIn} disabled={loading}>
-            {loading ? 'Please wait…' : isSignUp ? 'Create Account' : 'Sign In'}
-          </button>
-        </div>
-        <div className="signin-divider"><span>or</span></div>
-        <button className="btn-secondary signin-admin" onClick={() => setIsSignUp(!isSignUp)} style={{ marginBottom: '8px' }}>
-          {isSignUp ? 'Already have an account? Sign In' : 'Need an account? Sign Up'}
+        <p className="signin-tagline">Sign in to see your projects</p>
+        <button className="btn-primary signin-btn signin-google" onClick={handleGoogle} disabled={loading}>
+          <svg viewBox="0 0 24 24" width="18" height="18" style={{ marginRight: 8, flexShrink: 0 }}>
+            <path fill="#fff" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="rgba(255,255,255,0.8)" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="rgba(255,255,255,0.6)" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+            <path fill="rgba(255,255,255,0.9)" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+          </svg>
+          {loading ? 'Signing in…' : 'Sign in with Google'}
         </button>
-        <button className="btn-secondary signin-admin" onClick={onAdmin}>Continue as Admin</button>
-        <p className="signin-hint">Admins can view and manage all events</p>
+        {error && <p className="signin-error">{error}</p>}
+        <p className="signin-hint">Cape Creative staff sign in with @capecreative.co · Clients use their invited email</p>
       </div>
       <footer className="app-footer">
         <img src="/cape-logo-blue-sm.png" alt="" className="footer-mark" />
@@ -2088,6 +2143,7 @@ function SignInView({ events, onSignIn, onAdmin }) {
 function App() {
   const [events, setEvents] = useState([])
   const [trash, setTrash] = useState([])
+  const [archived, setArchived] = useState([])
   const [user, setUser] = useState(null)
   const [view, setView] = useState('loading')
   const [activeEventId, setActiveEventId] = useState(null)
@@ -2096,48 +2152,107 @@ function App() {
   const prevTrashRef = useRef(null)
 
   // ─── Check for existing Supabase session on mount ───
+  const [authError, setAuthError] = useState('')
+  const [authLoading, setAuthLoading] = useState(false)
+
+  // Resolve a Supabase session into a Poncho user object
+  const resolveSession = useCallback(async (session) => {
+    const userEmail = session.user.email.toLowerCase()
+    const isCapeCo = userEmail.endsWith('@capecreative.co')
+    // Load events to determine client access
+    const eventsData = await dbLoadEvents()
+    let access = isCapeCo ? 'edit' : null
+    let userName = session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email
+    let userRole = isCapeCo ? 'Team Member' : null
+    for (const ev of eventsData) {
+      for (const s of (ev.staff || [])) {
+        if (s.email?.toLowerCase() === userEmail) { userName = s.name; userRole = s.role; access = 'edit'; break }
+      }
+      for (const c of (ev.clients || [])) {
+        if (c.email?.toLowerCase() === userEmail) { userName = c.name; userRole = c.company || 'Client'; access = 'view'; break }
+      }
+    }
+    if (!access) {
+      // Email not recognized — deny access
+      await supabase.auth.signOut()
+      setAuthError('Your email isn\'t associated with any Poncho events. Contact your Cape Creative producer to be added.')
+      setAuthLoading(false)
+      setView('signin')
+      return
+    }
+    const userData = { name: userName, email: session.user.email, role: userRole, access, admin: isCapeCo }
+    setUser(userData)
+    localStorage.setItem('poncho-user', JSON.stringify(userData))
+    // Load remaining data and cache it
+    const [trashData, archivedData] = await Promise.all([dbLoadTrash(), dbLoadArchived()])
+    setEvents(eventsData)
+    setTrash(trashData)
+    setArchived(archivedData)
+    prevEventsRef.current = eventsData
+    localStorage.setItem('poncho-events-cache',   JSON.stringify(eventsData))
+    localStorage.setItem('poncho-trash-cache',    JSON.stringify(trashData))
+    localStorage.setItem('poncho-archived-cache', JSON.stringify(archivedData))
+    setView('dashboard')
+    setAuthLoading(false)
+  }, [])
+
   useEffect(() => {
     const init = async () => {
+      setAuthLoading(true)
       const { data: { session } } = await supabase.auth.getSession()
       if (session) {
-        const userData = JSON.parse(localStorage.getItem('poncho-user') || 'null')
-        if (userData) {
-          setUser(userData)
+        const cached = JSON.parse(localStorage.getItem('poncho-user') || 'null')
+        if (cached) {
+          // Show UI immediately with locally cached data
+          const cachedEvents   = JSON.parse(localStorage.getItem('poncho-events-cache')   || '[]')
+          const cachedTrash    = JSON.parse(localStorage.getItem('poncho-trash-cache')    || '[]')
+          const cachedArchived = JSON.parse(localStorage.getItem('poncho-archived-cache') || '[]')
+          setUser(cached)
+          setEvents(cachedEvents)
+          setTrash(cachedTrash)
+          setArchived(cachedArchived)
+          prevEventsRef.current = cachedEvents
           setView('dashboard')
+          setAuthLoading(false)
+          // Refresh from Supabase silently in background
+          Promise.all([dbLoadEvents(), dbLoadTrash(), dbLoadArchived()]).then(([eventsData, trashData, archivedData]) => {
+            setEvents(eventsData); setTrash(trashData); setArchived(archivedData)
+            prevEventsRef.current = eventsData
+            localStorage.setItem('poncho-events-cache',   JSON.stringify(eventsData))
+            localStorage.setItem('poncho-trash-cache',    JSON.stringify(trashData))
+            localStorage.setItem('poncho-archived-cache', JSON.stringify(archivedData))
+          })
         } else {
-          // Signed into Supabase but no local user data — treat as admin
-          setUser({ admin: true, email: session.user.email })
-          setView('dashboard')
+          await resolveSession(session)
         }
       } else {
         setView('signin')
+        setAuthLoading(false)
       }
     }
     init()
 
-    // Listen for auth state changes (e.g. sign out from another tab)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_OUT') {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' && session) {
+        setAuthLoading(true)
+        setAuthError('')
+        await resolveSession(session)
+      } else if (event === 'SIGNED_OUT') {
         setUser(null)
+        setEvents([])
+        setTrash([])
+        setArchived([])
         setView('signin')
         localStorage.removeItem('poncho-user')
+        localStorage.removeItem('poncho-events-cache')
+        localStorage.removeItem('poncho-trash-cache')
+        localStorage.removeItem('poncho-archived-cache')
       }
     })
     return () => subscription.unsubscribe()
-  }, [])
+  }, [resolveSession])
 
-  // ─── Load data from Supabase when user is authenticated ───
-  useEffect(() => {
-    if (!user) return
-    const loadData = async () => {
-      const [eventsData, trashData] = await Promise.all([dbLoadEvents(), dbLoadTrash()])
-      setEvents(eventsData)
-      setTrash(trashData)
-      prevEventsRef.current = eventsData
-      prevTrashRef.current = trashData
-    }
-    loadData()
-  }, [user])
+  // Data is loaded inside resolveSession / init — no separate load effect needed
 
   // ─── Sync events to Supabase when they change ───
   useEffect(() => {
@@ -2159,26 +2274,6 @@ function App() {
     prevEventsRef.current = events
   }, [events, user])
 
-  // ─── Persist user info locally for session recovery ───
-  useEffect(() => {
-    if (user) localStorage.setItem('poncho-user', JSON.stringify(user))
-    else localStorage.removeItem('poncho-user')
-  }, [user])
-
-  const signIn = (userData) => { setUser(userData); setView('dashboard') }
-  const signInAdmin = async () => {
-    // Admin uses a special anonymous-style Supabase sign-in
-    // For simplicity, admin still stores locally but needs a Supabase session
-    const { data: { session } } = await supabase.auth.getSession()
-    if (session) {
-      setUser({ admin: true, email: session.user.email })
-      setView('dashboard')
-    } else {
-      // If no session, prompt to sign in first
-      setUser({ admin: true })
-      setView('dashboard')
-    }
-  }
   const signOut = async () => {
     await supabase.auth.signOut()
     setUser(null)
@@ -2217,6 +2312,33 @@ function App() {
   const permanentDelete = (id) => {
     setTrash(prev => prev.filter(ev => ev.id !== id))
     dbDeleteFromTrash(id)
+    dbDeleteCompleted(id)
+  }
+
+  const archiveEvent = (id) => {
+    const event = events.find(ev => ev.id === id)
+    if (event) {
+      const archivedEvent = { ...event, archivedAt: Date.now() }
+      setArchived(prev => [...prev, archivedEvent])
+      dbSaveToArchive(archivedEvent)
+    }
+    setEvents(prev => prev.filter(ev => ev.id !== id))
+  }
+
+  const unarchiveEvent = (id) => {
+    const event = archived.find(ev => ev.id === id)
+    if (event) {
+      const { archivedAt, ...restored } = event
+      setEvents(prev => [...prev, restored])
+      dbSaveEvent(restored)
+    }
+    setArchived(prev => prev.filter(ev => ev.id !== id))
+    dbDeleteFromArchive(id)
+  }
+
+  const permanentDeleteArchived = (id) => {
+    setArchived(prev => prev.filter(ev => ev.id !== id))
+    dbDeleteFromArchive(id)
     dbDeleteCompleted(id)
   }
 
@@ -2268,7 +2390,7 @@ function App() {
   }
 
   if (view === 'signin' || !user) {
-    return <SignInView events={events} onSignIn={signIn} onAdmin={signInAdmin} />
+    return <SignInView error={authError} loading={authLoading} />
   }
 
   // Filter events for non-admin users
@@ -2294,7 +2416,7 @@ function App() {
     return <ROSView event={event} allEvents={events} onUpdate={updateEvent} onBack={goHome} viewOnly={isViewOnly} />
   }
 
-  return <Dashboard events={visibleEvents} trash={trash} user={user} onOpenEvent={openEvent} onCreateEvent={() => setView('create')} onDeleteEvent={deleteEvent} onDuplicateEvent={duplicateEvent} onRestoreEvent={restoreEvent} onPermanentDelete={permanentDelete} onEmptyTrash={emptyTrash} onSignOut={signOut} />
+  return <Dashboard events={visibleEvents} trash={trash} archived={archived} user={user} onOpenEvent={openEvent} onCreateEvent={() => setView('create')} onDeleteEvent={deleteEvent} onDuplicateEvent={duplicateEvent} onRestoreEvent={restoreEvent} onPermanentDelete={permanentDelete} onEmptyTrash={emptyTrash} onArchiveEvent={archiveEvent} onUnarchiveEvent={unarchiveEvent} onPermanentDeleteArchived={permanentDeleteArchived} onSignOut={signOut} />
 }
 
 export default App

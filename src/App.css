@@ -493,6 +493,14 @@
   font-size: 11px;
 }
 
+.weather-heading {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
 .weather-icon {
   font-size: 18px;
 }
@@ -1585,6 +1593,16 @@ select.form-input {
   opacity: 0.85;
   border-color: var(--green);
   box-shadow: 0 4px 20px rgba(16, 185, 129, 0.1);
+}
+
+.dash-card.archived {
+  opacity: 0.75;
+  background: #f1f5f9;
+}
+
+.dash-card.archived:hover {
+  opacity: 1;
+  border-color: var(--accent);
 }
 
 .trash-card-actions {
