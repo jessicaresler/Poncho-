@@ -2159,26 +2159,32 @@ function SignInView({ error, loading }) {
 }
 
 function App() {
-  const [events, setEvents] = useState([])
-  const [trash, setTrash] = useState([])
-  const [archived, setArchived] = useState([])
-  const [user, setUser] = useState(null)
-  const [view, setView] = useState('loading')
+  // ─── Synchronous init from localStorage — zero-flash load ───
+  const _cachedUser     = JSON.parse(localStorage.getItem('poncho-user')           || 'null')
+  const _cachedEvents   = JSON.parse(localStorage.getItem('poncho-events-cache')   || '[]')
+  const _cachedTrash    = JSON.parse(localStorage.getItem('poncho-trash-cache')    || '[]')
+  const _cachedArchived = JSON.parse(localStorage.getItem('poncho-archived-cache') || '[]')
+
+  const [events, setEvents] = useState(_cachedEvents)
+  const [trash, setTrash] = useState(_cachedTrash)
+  const [archived, setArchived] = useState(_cachedArchived)
+  const [user, setUser] = useState(_cachedUser)
+  const [view, setView] = useState(_cachedUser ? 'dashboard' : 'signin')
   const [activeEventId, setActiveEventId] = useState(null)
   const [pendingEvent, setPendingEvent] = useState(null)
-  const prevEventsRef = useRef(null)
+  const prevEventsRef = useRef(_cachedEvents)
   const prevTrashRef = useRef(null)
 
   // ─── Check for existing Supabase session on mount ───
   const [authError, setAuthError] = useState('')
   const [authLoading, setAuthLoading] = useState(false)
 
-  // Resolve a Supabase session into a Poncho user object
+  // Resolve a Supabase session into a Poncho user object (all 3 DB queries in parallel)
   const resolveSession = useCallback(async (session) => {
     const userEmail = session.user.email.toLowerCase()
     const isCapeCo = userEmail.endsWith('@capecreative.co')
-    // Load events to determine client access
-    const eventsData = await dbLoadEvents()
+    // Load all data in parallel
+    const [eventsData, trashData, archivedData] = await Promise.all([dbLoadEvents(), dbLoadTrash(), dbLoadArchived()])
     let access = isCapeCo ? 'edit' : null
     let userName = session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email
     let userRole = isCapeCo ? 'Team Member' : null
@@ -2201,8 +2207,6 @@ function App() {
     const userData = { name: userName, email: session.user.email, role: userRole, access, admin: isCapeCo }
     setUser(userData)
     localStorage.setItem('poncho-user', JSON.stringify(userData))
-    // Load remaining data and cache it
-    const [trashData, archivedData] = await Promise.all([dbLoadTrash(), dbLoadArchived()])
     setEvents(eventsData)
     setTrash(trashData)
     setArchived(archivedData)
@@ -2216,33 +2220,30 @@ function App() {
 
   useEffect(() => {
     const init = async () => {
+      // If we already have a cached user, the UI is already showing — just verify session & refresh in background
+      if (_cachedUser) {
+        supabase.auth.getSession().then(({ data: { session } }) => {
+          if (!session) {
+            // Session expired — sign out
+            supabase.auth.signOut()
+          } else {
+            // Silently refresh data from Supabase
+            Promise.all([dbLoadEvents(), dbLoadTrash(), dbLoadArchived()]).then(([eventsData, trashData, archivedData]) => {
+              setEvents(eventsData); setTrash(trashData); setArchived(archivedData)
+              prevEventsRef.current = eventsData
+              localStorage.setItem('poncho-events-cache',   JSON.stringify(eventsData))
+              localStorage.setItem('poncho-trash-cache',    JSON.stringify(trashData))
+              localStorage.setItem('poncho-archived-cache', JSON.stringify(archivedData))
+            })
+          }
+        })
+        return
+      }
+      // No cache — check for session, then load or show sign-in
       setAuthLoading(true)
       const { data: { session } } = await supabase.auth.getSession()
       if (session) {
-        const cached = JSON.parse(localStorage.getItem('poncho-user') || 'null')
-        if (cached) {
-          // Show UI immediately with locally cached data
-          const cachedEvents   = JSON.parse(localStorage.getItem('poncho-events-cache')   || '[]')
-          const cachedTrash    = JSON.parse(localStorage.getItem('poncho-trash-cache')    || '[]')
-          const cachedArchived = JSON.parse(localStorage.getItem('poncho-archived-cache') || '[]')
-          setUser(cached)
-          setEvents(cachedEvents)
-          setTrash(cachedTrash)
-          setArchived(cachedArchived)
-          prevEventsRef.current = cachedEvents
-          setView('dashboard')
-          setAuthLoading(false)
-          // Refresh from Supabase silently in background
-          Promise.all([dbLoadEvents(), dbLoadTrash(), dbLoadArchived()]).then(([eventsData, trashData, archivedData]) => {
-            setEvents(eventsData); setTrash(trashData); setArchived(archivedData)
-            prevEventsRef.current = eventsData
-            localStorage.setItem('poncho-events-cache',   JSON.stringify(eventsData))
-            localStorage.setItem('poncho-trash-cache',    JSON.stringify(trashData))
-            localStorage.setItem('poncho-archived-cache', JSON.stringify(archivedData))
-          })
-        } else {
-          await resolveSession(session)
-        }
+        await resolveSession(session)
       } else {
         setView('signin')
         setAuthLoading(false)
@@ -2395,17 +2396,6 @@ function App() {
       setPendingEvent(null)
     }
   }, [events, pendingEvent])
-
-  if (view === 'loading') {
-    return (
-      <div className="signin-view">
-        <div className="signin-card" style={{ textAlign: 'center' }}>
-          <Logo variant="white" />
-          <p className="signin-tagline">Loading…</p>
-        </div>
-      </div>
-    )
-  }
 
   if (view === 'signin' || !user) {
     return <SignInView error={authError} loading={authLoading} />
