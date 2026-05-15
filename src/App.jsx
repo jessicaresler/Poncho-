@@ -2220,22 +2220,17 @@ function App() {
 
   useEffect(() => {
     const init = async () => {
-      // If we already have a cached user, the UI is already showing — just verify session & refresh in background
+      // If we already have a cached user, the UI is already showing.
+      // Just verify the session is still valid — DO NOT refresh data from DB
+      // (would overwrite any local edits that haven't been synced yet).
       if (_cachedUser) {
         supabase.auth.getSession().then(({ data: { session } }) => {
           if (!session) {
             // Session expired — sign out
             supabase.auth.signOut()
-          } else {
-            // Silently refresh data from Supabase
-            Promise.all([dbLoadEvents(), dbLoadTrash(), dbLoadArchived()]).then(([eventsData, trashData, archivedData]) => {
-              setEvents(eventsData); setTrash(trashData); setArchived(archivedData)
-              prevEventsRef.current = eventsData
-              localStorage.setItem('poncho-events-cache',   JSON.stringify(eventsData))
-              localStorage.setItem('poncho-trash-cache',    JSON.stringify(trashData))
-              localStorage.setItem('poncho-archived-cache', JSON.stringify(archivedData))
-            })
           }
+          // No background data refresh — local cache is authoritative on load.
+          // The sync useEffect will push any pending changes to DB.
         })
         return
       }
@@ -2273,9 +2268,12 @@ function App() {
 
   // Data is loaded inside resolveSession / init — no separate load effect needed
 
-  // ─── Sync events to Supabase when they change ───
+  // ─── Sync events to Supabase + localStorage when they change ───
   useEffect(() => {
-    if (!user || prevEventsRef.current === null) return
+    if (!user) return
+    // Always cache to localStorage immediately — preserves edits even if DB save fails
+    localStorage.setItem('poncho-events-cache', JSON.stringify(events))
+    if (prevEventsRef.current === null) { prevEventsRef.current = events; return }
     // Find which events changed and save them
     const prev = prevEventsRef.current
     events.forEach(ev => {
@@ -2292,6 +2290,17 @@ function App() {
     })
     prevEventsRef.current = events
   }, [events, user])
+
+  // ─── Cache trash + archived to localStorage on every change ───
+  useEffect(() => {
+    if (!user) return
+    localStorage.setItem('poncho-trash-cache', JSON.stringify(trash))
+  }, [trash, user])
+
+  useEffect(() => {
+    if (!user) return
+    localStorage.setItem('poncho-archived-cache', JSON.stringify(archived))
+  }, [archived, user])
 
   const signOut = () => {
     // Clear UI immediately — don't block on network
